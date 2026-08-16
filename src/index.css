@@ -1,1 +1,215 @@
 @import "tailwindcss";
+
+/* ============================================================
+   TEMA "LEGAJO ACADÉMICO"
+   Remapeamos los tokens de color de Tailwind v4 (que son
+   variables CSS) en vez de tocar cada className en App.jsx.
+   Así bg-violet-600, text-indigo-950, etc. siguen funcionando
+   en todo el código, pero resuelven a la nueva paleta.
+
+   Mapeo semántico (se mantiene el significado, cambia el color):
+   - violet  → acento primario / CTA        → oxblood (antes violeta)
+   - indigo  → texto y superficies neutras  → tinta navy / pergamino
+   - emerald → éxito / materia aprobada     → salvia
+   - amber   → racha / entregas             → dorado
+   - teal    → repaso / dominio             → verde azulado apagado
+   - rose    → error / "no la sabía"        → se mantiene (ya es sobrio)
+   - slate   → neutro / pendiente           → gris tinta
+   ============================================================ */
+
+@theme {
+  --font-display: 'Fraunces', Georgia, serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+
+  /* cantos rectos: el legajo no usa esquinas muy redondeadas */
+  --radius-xl: 2px;
+  --radius-2xl: 2px;
+  --radius-3xl: 2px;
+
+  /* -- violet → oxblood (acento primario / CTA) -- */
+  --color-violet-50:  #F6EDE9;
+  --color-violet-100: #EFDCD5;
+  --color-violet-200: #DFB9AC;
+  --color-violet-300: #CE9585;
+  --color-violet-400: #AC5F51;
+  --color-violet-500: #8B3A3A;
+  --color-violet-600: #7A3232;
+  --color-violet-700: #692A2A;
+  --color-violet-800: #582323;
+  --color-violet-900: #471C1C;
+  --color-violet-950: #2E1212;
+
+  /* -- indigo → tinta navy / pergamino (texto y superficies neutras) -- */
+  --color-indigo-50:  #EAE2CD;
+  --color-indigo-100: #DFD6BC;
+  --color-indigo-200: #C9BFA3;
+  --color-indigo-300: #A79E85;
+  --color-indigo-400: #837B67;
+  --color-indigo-500: #5C6478;
+  --color-indigo-600: #4A5064;
+  --color-indigo-700: #3A4054;
+  --color-indigo-800: #2E3446;
+  --color-indigo-900: #242C3F;
+  --color-indigo-950: #1A2030;
+
+  /* -- emerald → salvia (materia aprobada / éxito) -- */
+  --color-emerald-50:  #EAF1E9;
+  --color-emerald-100: #D3E3D1;
+  --color-emerald-200: #A9C8A6;
+  --color-emerald-300: #82AC7E;
+  --color-emerald-400: #6B8F71;
+  --color-emerald-500: #5C7A5E;
+  --color-emerald-600: #4C6A4E;
+  --color-emerald-700: #3E5740;
+
+  /* -- amber → dorado (racha / entregas) -- */
+  --color-amber-50:  #F6EFDF;
+  --color-amber-100: #EDDFC0;
+  --color-amber-200: #DCC28E;
+  --color-amber-500: #B8934A;
+  --color-amber-600: #9C7A3B;
+  --color-amber-700: #7D622F;
+
+  /* -- teal → verde azulado apagado (repaso / dominio) -- */
+  --color-teal-50:  #E9F1EE;
+  --color-teal-200: #A9CCC1;
+  --color-teal-400: #5E9C8B;
+  --color-teal-500: #3E8E7E;
+  --color-teal-600: #33756A;
+  --color-teal-700: #2A5F56;
+
+  /* -- slate → gris tinta (neutro / pendiente) -- */
+  --color-slate-50:  #F2EFE6;
+  --color-slate-100: #E5E0D2;
+  --color-slate-300: #A79E85;
+  --color-slate-400: #837B67;
+  --color-slate-500: #5C6478;
+}
+
+/* Modo oscuro: como los colores son variables, alcanza con
+   redefinirlas dentro de .dark — no hace falta pisar cada
+   utility class una por una como antes. */
+.dark {
+  color-scheme: dark;
+
+  --color-indigo-50:  #171225;
+  --color-indigo-100: #241F35;
+  --color-indigo-200: #322C45;
+  --color-indigo-300: #56506C;
+  --color-indigo-400: #857FA0;
+  --color-indigo-500: #A9A3C0;
+  --color-indigo-900: #EDE8D8;
+  --color-indigo-950: #F5F1E4;
+
+  --color-violet-50:  #2A1C1C;
+  --color-violet-100: #3A2626;
+  --color-violet-200: #5C3838;
+  --color-violet-500: #C97A6E;
+  --color-violet-600: #D68F84;
+  --color-violet-700: #E3A89F;
+
+  --color-emerald-50:  #16241A;
+  --color-emerald-200: #2E4A33;
+  --color-emerald-500: #86B587;
+  --color-emerald-600: #9CC29D;
+  --color-emerald-700: #6E9C70;
+
+  --color-amber-50:  #2A2110;
+  --color-amber-100: #3A2E16;
+  --color-amber-200: #5C4A24;
+  --color-amber-600: #D9B876;
+  --color-amber-700: #E5C994;
+
+  --color-teal-50:  #10231F;
+  --color-teal-200: #2C4D45;
+  --color-teal-600: #7FC1B1;
+  --color-teal-700: #9CD3C5;
+
+  --color-slate-50:  #1C1A24;
+  --color-slate-100: #2A2733;
+  --color-slate-300: #6F6A80;
+  --color-slate-400: #9993A0;
+
+  --color-rose-50:  #2A161C;
+  --color-rose-200: #4D2530;
+  --color-rose-500: #E38A9B;
+  --color-rose-600: #EBA2B0;
+  --color-rose-700: #F2BDC8;
+
+  background-color: #14101E;
+}
+
+.dark body,
+.dark #root {
+  background-color: #14101E;
+}
+
+/* "white" no es un token semántico como indigo/violet — es un color fijo,
+   así que hay que pisarlo a mano. Se usa como superficie de tarjetas,
+   header, navbar e inputs en TODO el archivo (~50 lugares), por eso esto
+   no es opcional: sin esto, en dark mode quedan tarjetas blancas con
+   texto claro encima = ilegible (el bug que viste en el screenshot). */
+.dark .bg-white         { background-color: #1E1A30; }
+.dark .bg-white\/95      { background-color: rgba(30, 26, 48, .95); }
+.dark .bg-white\/90      { background-color: rgba(30, 26, 48, .90); }
+.dark .bg-white\/80      { background-color: rgba(30, 26, 48, .80); }
+.dark .bg-white\/70      { background-color: rgba(30, 26, 48, .70); }
+.dark .bg-white\/60      { background-color: rgba(30, 26, 48, .60); }
+.dark .bg-white\/25      { background-color: rgba(30, 26, 48, .25); }
+.dark input,
+.dark textarea,
+.dark select {
+  background-color: #1E1A30;
+  color: #F0EBFA;
+}
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #6F6494;
+}
+
+/* ============================================================
+   Detalles del "legajo" que no son solo color
+   ============================================================ */
+
+/* Sello circular de la racha, en vez del pill genérico */
+.sf-seal {
+  position: relative;
+  border: 2px solid var(--color-violet-500);
+  border-radius: 9999px;
+}
+.sf-seal::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border: 1px dashed color-mix(in srgb, var(--color-violet-500) 55%, transparent);
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+/* "Cinta" sobre la tarjeta de cita */
+.sf-tape {
+  position: relative;
+}
+.sf-tape::before {
+  content: "";
+  position: absolute;
+  top: -9px;
+  left: 22px;
+  width: 46px;
+  height: 16px;
+  background: color-mix(in srgb, var(--color-amber-500) 55%, transparent);
+  transform: rotate(-4deg);
+}
+
+/* Barra de progreso "hilo cosido", para Mi Carrera.
+   Usa currentColor a propósito: ProgressBar aplica la clase de texto
+   equivalente (ver App.jsx) para que el patrón tome el color real de
+   la barra en vez de heredar un currentColor ambiguo. */
+.sf-thread {
+  background-image: repeating-linear-gradient(
+    90deg,
+    currentColor 0 6px,
+    color-mix(in srgb, currentColor 70%, black) 6px 8px
+  );
+}
