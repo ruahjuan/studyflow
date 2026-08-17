@@ -539,7 +539,6 @@ const QUOTES = [
   { text: "No cuentes los días, hacé que los días cuenten.", author: "Muhammad Ali" },
   { text: "Empezá donde estás, usá lo que tengas, hacé lo que puedas.", author: "Arthur Ashe" },
   { text: "El estudio, como todo camino de crecimiento, no pide perfección, sino constancia.", author: "Anónimo" },
-  { text: "La mente que se abre a una idea nueva jamás vuelve a su tamaño original.", author: "Albert Einstein" },
   { text: "Cada vez que estudiás algo aunque sea diez minutos, le estás ganando a la versión de vos que no lo hacía.", author: "Anónimo" },
   { text: "La paciencia es amarga, pero su fruto es dulce.", author: "Aristóteles" },
   { text: "No hay atajos para ningún lugar al que valga la pena ir.", author: "Beverly Sills" },
