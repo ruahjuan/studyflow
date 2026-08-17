@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 async function extractPdfText(file) {
   const buffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buffer, useWasm: false }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
   let fullText = "";
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
@@ -43,7 +43,7 @@ function getTesseractWorker() {
 // onProgress(paginaActual, totalPaginas) para mostrar avance en la UI
 async function ocrPdfText(file, onProgress) {
   const buffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buffer, useWasm: false }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
   const worker = await getTesseractWorker();
 
   let fullText = "";
@@ -1707,7 +1707,7 @@ function PdfViewerTab({ unitId, color }) {
         const blob = await getPdfBlob(unitId);
         if (!blob) { if (!cancelled) { setError(true); setLoading(false); } return; }
         const buffer = await blob.arrayBuffer();
-        const doc = await pdfjsLib.getDocument({ data: buffer, useWasm: false }).promise;
+        const doc = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
         if (cancelled) return;
         setPdfDoc(doc);
         setNumPages(doc.numPages);
