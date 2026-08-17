@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 async function extractPdfText(file) {
   const buffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/', useWasm: false }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
   let fullText = "";
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
@@ -40,16 +40,23 @@ function getTesseractWorker() {
   return tesseractWorkerPromise;
 }
 
-// onProgress(paginaActual, totalPaginas) para mostrar avance en la UI
-async function ocrPdfText(file, onProgress) {
+// onProgress(paginaActual, totalPaginas) para mostrar avance en la UI.
+// cancelToken es un objeto mutable { cancelled: false }: si se pone en true desde afuera,
+// el loop corta apenas termina la página en curso (no se puede abortar Tesseract a mitad de página).
+async function ocrPdfText(file, onProgress, cancelToken) {
   const buffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/', useWasm: false }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
+
+  if (onProgress) onProgress(0, pdf.numPages); // dispara el total ni bien se sabe, aunque la página 1 tarde en arrancar
+
   const worker = await getTesseractWorker();
 
   let fullText = "";
   for (let i = 1; i <= pdf.numPages; i++) {
+    if (cancelToken?.cancelled) break;
+
     const page = await pdf.getPage(i);
-    const viewport = page.getViewport({ scale: 2.0 }); // más escala = mejor precisión, más lento
+    const viewport = page.getViewport({ scale: 1.5 }); // más escala = mejor precisión, más lento
     const canvas = document.createElement("canvas");
     canvas.width = viewport.width;
     canvas.height = viewport.height;
@@ -1375,6 +1382,7 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
   const [pdfFile, setPdfFile] = useState(null);
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef(null);
+  const ocrCancelRef = useRef(null);
   const color = SUBJECT_COLORS.find(c => c.name === subject.color) || SUBJECT_COLORS[0];
 
   const submit = async () => {
@@ -1402,15 +1410,37 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
       let extracted = cleanExtractedText(await extractPdfText(file));
       if (!extracted) {
         // No hay texto embebido -> probablemente es un escaneo de imágenes. Probamos OCR.
-        setOcrProgress({ page: 0, total: 1 });
+        const buffer = await file.arrayBuffer();
+        const previewPdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
+        const totalPaginas = previewPdf.numPages;
+        if (totalPaginas > 15) {
+          const minutosAprox = Math.ceil(totalPaginas * 0.5); // estimación gruesa, ~30 seg/página
+          const seguir = window.confirm(
+            `Este PDF tiene ${totalPaginas} páginas escaneadas. Leerlas con reconocimiento de imagen puede tardar unos ${minutosAprox} minutos y podés cancelarlo en cualquier momento. ¿Querés continuar?`
+          );
+          if (!seguir) {
+            setPdfError("Cancelaste antes de empezar. Pegá el texto a mano, o subí el PDF de nuevo para reintentar.");
+            setExtracting(false);
+            return;
+          }
+        }
+        setOcrProgress({ page: 0, total: totalPaginas });
+        ocrCancelRef.current = { cancelled: false };
         try {
           extracted = cleanExtractedText(
-            await ocrPdfText(file, (page, total) => setOcrProgress({ page, total }))
+            await ocrPdfText(file, (page, total) => setOcrProgress({ page, total }), ocrCancelRef.current)
           );
         } catch (ocrErr) {
           extracted = "";
         } finally {
+          const fueCancelado = ocrCancelRef.current?.cancelled;
+          ocrCancelRef.current = null;
           setOcrProgress(null);
+          if (fueCancelado) {
+            setPdfError("Cancelaste la lectura de imagen. Pegá el texto a mano, o subí el PDF de nuevo para reintentar.");
+            setExtracting(false);
+            return;
+          }
         }
       }
       if (!extracted) {
@@ -1424,6 +1454,10 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
     } finally {
       setExtracting(false);
     }
+  };
+
+  const cancelOcr = () => {
+    if (ocrCancelRef.current) ocrCancelRef.current.cancelled = true;
   };
 
   return (
@@ -1510,10 +1544,19 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
             <span className="text-xs text-indigo-300">o pegá el texto abajo</span>
           </div>
           {ocrProgress && (
-            <p className="text-xs text-indigo-400 flex items-center gap-1">
-              <Loader2 size={12} className="animate-spin" />
-              No encontramos texto directo, así que estamos leyendo el PDF como imagen (más lento, pero funciona con escaneos). Página {ocrProgress.page} de {ocrProgress.total}...
-            </p>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <p className="text-xs text-indigo-400 flex items-center gap-1">
+                <Loader2 size={12} className="animate-spin" />
+                No encontramos texto directo, así que estamos leyendo el PDF como imagen (más lento, pero funciona con escaneos). Página {ocrProgress.page} de {ocrProgress.total}...
+              </p>
+              <button
+                type="button"
+                onClick={cancelOcr}
+                className="text-xs text-rose-500 hover:text-rose-600 font-display font-bold shrink-0"
+              >
+                Cancelar
+              </button>
+            </div>
           )}
           {pdfError && (
             <p className="text-xs text-rose-500 flex items-center gap-1">
@@ -1707,7 +1750,7 @@ function PdfViewerTab({ unitId, color }) {
         const blob = await getPdfBlob(unitId);
         if (!blob) { if (!cancelled) { setError(true); setLoading(false); } return; }
         const buffer = await blob.arrayBuffer();
-        const doc = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/', useWasm: false }).promise;
+        const doc = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
         if (cancelled) return;
         setPdfDoc(doc);
         setNumPages(doc.numPages);
