@@ -26,6 +26,45 @@ async function extractPdfText(file) {
   return fullText.trim();
 }
 
+/* ---------------- OCR de PDF escaneado (Tesseract.js, 100% local) ---------------- */
+
+let tesseractWorkerPromise = null;
+
+function getTesseractWorker() {
+  if (!tesseractWorkerPromise) {
+    tesseractWorkerPromise = (async () => {
+      const { createWorker } = await import("tesseract.js");
+      return createWorker("spa");
+    })();
+  }
+  return tesseractWorkerPromise;
+}
+
+// onProgress(paginaActual, totalPaginas) para mostrar avance en la UI
+async function ocrPdfText(file, onProgress) {
+  const buffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const worker = await getTesseractWorker();
+
+  let fullText = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2.0 }); // más escala = mejor precisión, más lento
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const ctx = canvas.getContext("2d");
+    await page.render({ canvasContext: ctx, viewport }).promise;
+
+    const { data: { text } } = await worker.recognize(canvas);
+    fullText += text.trim() + "\n\n";
+
+    if (onProgress) onProgress(i, pdf.numPages);
+  }
+
+  return fullText.trim();
+}
+
 function cleanExtractedText(raw) {
   return (raw || "")
     .replace(/\.{4,}/g, " ")       // puntos suspensivos de índices/tablas de contenido
@@ -1330,6 +1369,7 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
   const [extracting, setExtracting] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState(null); // { page, total } o null
   const [pdfError, setPdfError] = useState("");
   const [pdfName, setPdfName] = useState("");
   const [pdfFile, setPdfFile] = useState(null);
@@ -1359,9 +1399,22 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
     setPdfName(file.name);
     setPdfFile(file);
     try {
-      const extracted = cleanExtractedText(await extractPdfText(file));
+      let extracted = cleanExtractedText(await extractPdfText(file));
       if (!extracted) {
-        setPdfError("No se encontró texto en el PDF (puede ser un escaneo de imágenes). Vas a poder ver las páginas igual, pero pegá el texto a mano para que funcionen las flashcards.");
+        // No hay texto embebido -> probablemente es un escaneo de imágenes. Probamos OCR.
+        setOcrProgress({ page: 0, total: 1 });
+        try {
+          extracted = cleanExtractedText(
+            await ocrPdfText(file, (page, total) => setOcrProgress({ page, total }))
+          );
+        } catch (ocrErr) {
+          extracted = "";
+        } finally {
+          setOcrProgress(null);
+        }
+      }
+      if (!extracted) {
+        setPdfError("No se pudo leer texto de este PDF, ni siquiera con reconocimiento de imagen. Vas a poder ver las páginas igual, pero pegá el texto a mano para que funcionen las flashcards.");
       } else {
         setText(extracted);
         if (!title.trim()) setTitle(file.name.replace(/\.pdf$/i, ""));
@@ -1445,7 +1498,9 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
               className="flex items-center gap-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 font-display font-bold text-xs rounded-xl px-3 py-2 disabled:opacity-50"
             >
               {extracting ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
-              {extracting ? "Extrayendo texto..." : "Subir PDF"}
+              {extracting
+                ? (ocrProgress ? `Leyendo imagen ${ocrProgress.page}/${ocrProgress.total}...` : "Extrayendo texto...")
+                : "Subir PDF"}
             </button>
             {pdfName && !extracting && !pdfError && (
               <span className="text-xs text-emerald-600 flex items-center gap-1">
@@ -1454,6 +1509,12 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
             )}
             <span className="text-xs text-indigo-300">o pegá el texto abajo</span>
           </div>
+          {ocrProgress && (
+            <p className="text-xs text-indigo-400 flex items-center gap-1">
+              <Loader2 size={12} className="animate-spin" />
+              No encontramos texto directo, así que estamos leyendo el PDF como imagen (más lento, pero funciona con escaneos). Página {ocrProgress.page} de {ocrProgress.total}...
+            </p>
+          )}
           {pdfError && (
             <p className="text-xs text-rose-500 flex items-center gap-1">
               <X size={12} /> {pdfError}
