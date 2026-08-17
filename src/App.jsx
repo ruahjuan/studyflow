@@ -1357,6 +1357,10 @@ function Dashboard({ subjects, addSubject, deleteSubject, openSubject, openCalen
           );
         })}
       </div>
+
+      <p className="text-center text-[11px] text-indigo-300 mt-8">
+        StudyFlow · desplegado vía CI/CD 🚀
+      </p>
     </div>
   );
 }
