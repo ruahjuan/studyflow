@@ -43,16 +43,19 @@ function getTesseractWorker() {
 // onProgress(paginaActual, totalPaginas) para mostrar avance en la UI.
 // cancelToken es un objeto mutable { cancelled: false }: si se pone en true desde afuera,
 // el loop corta apenas termina la página en curso (no se puede abortar Tesseract a mitad de página).
-async function ocrPdfText(file, onProgress, cancelToken) {
+// fromPage/toPage (1-indexed, inclusive) permiten procesar solo una parte del PDF.
+async function ocrPdfText(file, onProgress, cancelToken, fromPage = 1, toPage = null) {
   const buffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
-
-  if (onProgress) onProgress(0, pdf.numPages); // dispara el total ni bien se sabe, aunque la página 1 tarde en arrancar
+  const ultimaPagina = toPage ? Math.min(toPage, pdf.numPages) : pdf.numPages;
+  const primeraPagina = Math.max(1, fromPage);
+  const totalARecorrer = ultimaPagina - primeraPagina + 1;
 
   const worker = await getTesseractWorker();
 
   let fullText = "";
-  for (let i = 1; i <= pdf.numPages; i++) {
+  let procesadas = 0;
+  for (let i = primeraPagina; i <= ultimaPagina; i++) {
     if (cancelToken?.cancelled) break;
 
     const page = await pdf.getPage(i);
@@ -66,7 +69,8 @@ async function ocrPdfText(file, onProgress, cancelToken) {
     const { data: { text } } = await worker.recognize(canvas);
     fullText += text.trim() + "\n\n";
 
-    if (onProgress) onProgress(i, pdf.numPages);
+    procesadas++;
+    if (onProgress) onProgress(procesadas, totalARecorrer);
   }
 
   return fullText.trim();
@@ -1380,6 +1384,9 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
   const [pdfError, setPdfError] = useState("");
   const [pdfName, setPdfName] = useState("");
   const [pdfFile, setPdfFile] = useState(null);
+  const [scanInfo, setScanInfo] = useState(null); // { totalPages } cuando el PDF es un escaneo sin texto
+  const [ocrFrom, setOcrFrom] = useState(1);
+  const [ocrTo, setOcrTo] = useState(1);
   const [saving, setSaving] = useState(false);
   const fileInputRef = useRef(null);
   const ocrCancelRef = useRef(null);
@@ -1403,48 +1410,22 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
       return;
     }
     setPdfError("");
+    setScanInfo(null);
     setExtracting(true);
     setPdfName(file.name);
     setPdfFile(file);
     try {
-      let extracted = cleanExtractedText(await extractPdfText(file));
+      const extracted = cleanExtractedText(await extractPdfText(file));
       if (!extracted) {
-        // No hay texto embebido -> probablemente es un escaneo de imágenes. Probamos OCR.
+        // No hay texto embebido -> probablemente es un escaneo de imágenes.
+        // No disparamos OCR de todo el PDF: mostramos el selector de páginas para que
+        // el usuario elija qué rango leer ahora (puede repetir con otros rangos después).
         const buffer = await file.arrayBuffer();
         const previewPdf = await pdfjsLib.getDocument({ data: buffer, wasmUrl: '/pdfjs-wasm/' }).promise;
         const totalPaginas = previewPdf.numPages;
-        if (totalPaginas > 15) {
-          const minutosAprox = Math.ceil(totalPaginas * 0.5); // estimación gruesa, ~30 seg/página
-          const seguir = window.confirm(
-            `Este PDF tiene ${totalPaginas} páginas escaneadas. Leerlas con reconocimiento de imagen puede tardar unos ${minutosAprox} minutos y podés cancelarlo en cualquier momento. ¿Querés continuar?`
-          );
-          if (!seguir) {
-            setPdfError("Cancelaste antes de empezar. Pegá el texto a mano, o subí el PDF de nuevo para reintentar.");
-            setExtracting(false);
-            return;
-          }
-        }
-        setOcrProgress({ page: 0, total: totalPaginas });
-        ocrCancelRef.current = { cancelled: false };
-        try {
-          extracted = cleanExtractedText(
-            await ocrPdfText(file, (page, total) => setOcrProgress({ page, total }), ocrCancelRef.current)
-          );
-        } catch (ocrErr) {
-          extracted = "";
-        } finally {
-          const fueCancelado = ocrCancelRef.current?.cancelled;
-          ocrCancelRef.current = null;
-          setOcrProgress(null);
-          if (fueCancelado) {
-            setPdfError("Cancelaste la lectura de imagen. Pegá el texto a mano, o subí el PDF de nuevo para reintentar.");
-            setExtracting(false);
-            return;
-          }
-        }
-      }
-      if (!extracted) {
-        setPdfError("No se pudo leer texto de este PDF, ni siquiera con reconocimiento de imagen. Vas a poder ver las páginas igual, pero pegá el texto a mano para que funcionen las flashcards.");
+        setScanInfo({ totalPages: totalPaginas });
+        setOcrFrom(1);
+        setOcrTo(Math.min(totalPaginas, 10));
       } else {
         setText(extracted);
         if (!title.trim()) setTitle(file.name.replace(/\.pdf$/i, ""));
@@ -1458,6 +1439,37 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
 
   const cancelOcr = () => {
     if (ocrCancelRef.current) ocrCancelRef.current.cancelled = true;
+  };
+
+  const runOcrRange = async () => {
+    if (!pdfFile || !scanInfo) return;
+    const from = Math.max(1, Math.min(ocrFrom, scanInfo.totalPages));
+    const to = Math.max(from, Math.min(ocrTo, scanInfo.totalPages));
+    setPdfError("");
+    setExtracting(true);
+    setOcrProgress({ page: 0, total: to - from + 1 });
+    ocrCancelRef.current = { cancelled: false };
+    try {
+      const extracted = cleanExtractedText(
+        await ocrPdfText(pdfFile, (page, total) => setOcrProgress({ page, total }), ocrCancelRef.current, from, to)
+      );
+      const fueCancelado = ocrCancelRef.current?.cancelled;
+      if (fueCancelado && !extracted) {
+        setPdfError("Cancelaste antes de terminar esta tanda. Podés reintentar el mismo rango o elegir uno más chico.");
+      } else if (!extracted) {
+        setPdfError("No se pudo leer texto en ese rango de páginas. Probá con otro rango, o pegá el texto a mano.");
+      } else {
+        const encabezado = `\n\n--- Páginas ${from}–${to} ---\n`;
+        setText(prev => (prev.trim() ? prev.trim() + encabezado + extracted : extracted));
+        if (!title.trim()) setTitle(pdfName.replace(/\.pdf$/i, ""));
+      }
+    } catch (e) {
+      setPdfError("Falló la lectura de imagen en ese rango. Probá de nuevo o con un rango más chico.");
+    } finally {
+      ocrCancelRef.current = null;
+      setOcrProgress(null);
+      setExtracting(false);
+    }
   };
 
   return (
@@ -1536,18 +1548,61 @@ function SubjectView({ subject, back, openUnit, addUnit, deleteUnit, update }) {
                 ? (ocrProgress ? `Leyendo imagen ${ocrProgress.page}/${ocrProgress.total}...` : "Extrayendo texto...")
                 : "Subir PDF"}
             </button>
-            {pdfName && !extracting && !pdfError && (
+            {pdfName && !extracting && !pdfError && !scanInfo && (
               <span className="text-xs text-emerald-600 flex items-center gap-1">
                 <Check size={12} /> {pdfName}
               </span>
             )}
             <span className="text-xs text-indigo-300">o pegá el texto abajo</span>
           </div>
+          {scanInfo && (
+            <div className="bg-indigo-50/60 border border-indigo-100 rounded-xl p-3 space-y-2">
+              <p className="text-xs text-indigo-500">
+                <strong>{pdfName}</strong> es un escaneo de imágenes ({scanInfo.totalPages} páginas, sin texto seleccionable). Elegí qué rango de páginas leer con reconocimiento de imagen — podés repetir con otro rango después.
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="text-xs text-indigo-400 flex items-center gap-1">
+                  Desde
+                  <input
+                    type="number"
+                    min={1}
+                    max={scanInfo.totalPages}
+                    value={ocrFrom}
+                    onChange={e => setOcrFrom(Number(e.target.value) || 1)}
+                    disabled={extracting}
+                    className="w-16 border border-indigo-200 rounded-lg px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-violet-300"
+                  />
+                </label>
+                <label className="text-xs text-indigo-400 flex items-center gap-1">
+                  hasta
+                  <input
+                    type="number"
+                    min={1}
+                    max={scanInfo.totalPages}
+                    value={ocrTo}
+                    onChange={e => setOcrTo(Number(e.target.value) || 1)}
+                    disabled={extracting}
+                    className="w-16 border border-indigo-200 rounded-lg px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-violet-300"
+                  />
+                </label>
+                <span className="text-xs text-indigo-300">de {scanInfo.totalPages}</span>
+                <button
+                  type="button"
+                  onClick={runOcrRange}
+                  disabled={extracting}
+                  className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-display font-bold text-xs rounded-xl px-3 py-1.5 disabled:opacity-50"
+                >
+                  {extracting ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
+                  Leer estas páginas
+                </button>
+              </div>
+            </div>
+          )}
           {ocrProgress && (
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <p className="text-xs text-indigo-400 flex items-center gap-1">
                 <Loader2 size={12} className="animate-spin" />
-                No encontramos texto directo, así que estamos leyendo el PDF como imagen (más lento, pero funciona con escaneos). Página {ocrProgress.page} de {ocrProgress.total}...
+                Leyendo el rango elegido como imagen... página {ocrProgress.page} de {ocrProgress.total} de esta tanda.
               </p>
               <button
                 type="button"
