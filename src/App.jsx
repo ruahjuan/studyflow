@@ -5,7 +5,8 @@ import {
   Upload, Check, Layers, HelpCircle, RotateCcw, Loader2,
   GraduationCap, FileText, Target, Pencil, StickyNote,
   Calendar, Map, CalendarClock, Download, Home, Sun, Moon,
-  ZoomIn, ZoomOut, Highlighter, ChevronDown, ChevronUp
+  ZoomIn, ZoomOut, Highlighter, ChevronDown, ChevronUp,
+  Play, Pause, Timer, SkipForward
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -322,6 +323,177 @@ function useTheme() {
   return [theme, toggle];
 }
 
+/* ---------------- Pomodoro (cronómetro + notificaciones) ---------------- */
+
+const POMODORO_WORK_DEFAULT = 25;
+const POMODORO_BREAK_DEFAULT = 5;
+const POMODORO_LONG_BREAK = 15;
+const POMODORO_CYCLES_FOR_LONG_BREAK = 4;
+
+function formatMs(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+async function ensureNotificationPermission() {
+  if (typeof Notification === "undefined") return "unsupported";
+  if (Notification.permission === "granted") return "granted";
+  if (Notification.permission === "denied") return "denied";
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    return "denied";
+  }
+}
+
+// Usa la notificación de la Service Worker si hay una registrada (persiste mejor
+// en el panel de notificaciones del celular); si no, cae a la API simple de
+// Notification, que solo funciona mientras la pestaña sigue abierta.
+async function showPomodoroNotification(title, body, { silent = true, vibrate } = {}) {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const options = {
+    body,
+    tag: "studyflow-pomodoro",
+    renotify: !silent,
+    silent,
+    ...(vibrate ? { vibrate } : {}),
+    // Si tu manifest tiene un ícono en otra ruta, cambialo acá.
+    icon: "/pwa-192.png",
+    badge: "/pwa-192.png",
+  };
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration();
+    if (reg) {
+      await reg.showNotification(title, options);
+      return;
+    }
+  } catch {}
+  try {
+    new Notification(title, options);
+  } catch {}
+}
+
+function closePomodoroNotification() {
+  navigator.serviceWorker?.getRegistration()
+    .then(reg => reg?.getNotifications({ tag: "studyflow-pomodoro" }))
+    .then(list => list?.forEach(n => n.close()))
+    .catch(() => {});
+}
+
+// Cronómetro basado en timestamps (no en un contador que decrece): así, si el
+// navegador pausa el JS en segundo plano (pantalla bloqueada, pestaña
+// suspendida) y volvés a abrir la app, el tiempo restante se recalcula solo
+// contra la hora real, sin perder precisión ni "deberte" segundos.
+function usePomodoro(onWorkSessionComplete) {
+  const [state, setState] = useLocalStorage("studyflow_pomodoro", {
+    status: "idle",       // idle | running | paused
+    phase: "work",        // work | break
+    endsAt: null,         // timestamp ms — válido si status === "running"
+    remainingMs: null,    // válido si status === "paused"
+    cyclesCompleted: 0,
+    workMin: POMODORO_WORK_DEFAULT,
+    breakMin: POMODORO_BREAK_DEFAULT,
+  });
+  const [now, setNow] = useState(Date.now());
+  const notifiedEndRef = useRef(false);
+
+  useEffect(() => {
+    if (state.status !== "running") return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [state.status]);
+
+  const isLongBreak = state.phase === "break" && state.cyclesCompleted > 0 && state.cyclesCompleted % POMODORO_CYCLES_FOR_LONG_BREAK === 0;
+  const currentPhaseMin = state.phase === "work" ? state.workMin : (isLongBreak ? POMODORO_LONG_BREAK : state.breakMin);
+
+  const remainingMs = state.status === "running"
+    ? Math.max(0, (state.endsAt || 0) - now)
+    : state.status === "paused"
+      ? (state.remainingMs || 0)
+      : currentPhaseMin * 60000;
+
+  // Notificación con el tiempo restante, actualizada cada ~30s mientras corre.
+  useEffect(() => {
+    if (state.status !== "running") return;
+    showPomodoroNotification(
+      state.phase === "work" ? "Estudiando" : (isLongBreak ? "Descanso largo" : "Descanso"),
+      `${formatMs(remainingMs)} restantes`,
+      { silent: true }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.status, state.phase, Math.floor(remainingMs / 30000)]);
+
+  // Fin de fase: pasa a la siguiente automáticamente.
+  useEffect(() => {
+    if (state.status !== "running") { notifiedEndRef.current = false; return; }
+    if (remainingMs > 0) { notifiedEndRef.current = false; return; }
+    if (notifiedEndRef.current) return;
+    notifiedEndRef.current = true;
+
+    const wasWork = state.phase === "work";
+    const cyclesCompleted = wasWork ? state.cyclesCompleted + 1 : state.cyclesCompleted;
+    const nextPhase = wasWork ? "break" : "work";
+    const nextIsLong = nextPhase === "break" && cyclesCompleted % POMODORO_CYCLES_FOR_LONG_BREAK === 0;
+    const nextMin = nextPhase === "work" ? state.workMin : (nextIsLong ? POMODORO_LONG_BREAK : state.breakMin);
+
+    if (wasWork && onWorkSessionComplete) onWorkSessionComplete();
+
+    try { navigator.vibrate?.(wasWork ? [200, 100, 200, 100, 400] : [200]); } catch {}
+    showPomodoroNotification(
+      wasWork ? "¡Sesión terminada!" : "Volvamos al estudio",
+      wasWork ? "Tomate un descanso." : "Arrancá la próxima sesión cuando quieras.",
+      { silent: false, vibrate: [200, 100, 200] }
+    );
+
+    setState(s => ({
+      ...s,
+      phase: nextPhase,
+      cyclesCompleted,
+      status: "running",
+      endsAt: Date.now() + nextMin * 60000,
+      remainingMs: null,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [remainingMs, state.status, state.phase]);
+
+  const start = (workMin = state.workMin, breakMin = state.breakMin) => {
+    ensureNotificationPermission();
+    setState(s => ({
+      ...s,
+      status: "running", phase: "work", cyclesCompleted: 0,
+      workMin, breakMin,
+      endsAt: Date.now() + workMin * 60000, remainingMs: null,
+    }));
+  };
+  const pause = () => setState(s => s.status !== "running" ? s : ({
+    ...s, status: "paused", remainingMs: Math.max(0, (s.endsAt || 0) - Date.now()), endsAt: null,
+  }));
+  const resume = () => setState(s => s.status !== "paused" ? s : ({
+    ...s, status: "running", endsAt: Date.now() + (s.remainingMs || 0), remainingMs: null,
+  }));
+  const skip = () => setState(s => {
+    if (s.status === "idle") return s;
+    const wasWork = s.phase === "work";
+    const cyclesCompleted = wasWork ? s.cyclesCompleted + 1 : s.cyclesCompleted;
+    const nextPhase = wasWork ? "break" : "work";
+    const nextIsLong = nextPhase === "break" && cyclesCompleted % POMODORO_CYCLES_FOR_LONG_BREAK === 0;
+    const nextMin = nextPhase === "work" ? s.workMin : (nextIsLong ? POMODORO_LONG_BREAK : s.breakMin);
+    return { ...s, phase: nextPhase, cyclesCompleted, status: "running", endsAt: Date.now() + nextMin * 60000, remainingMs: null };
+  });
+  const reset = () => {
+    closePomodoroNotification();
+    setState(s => ({ ...s, status: "idle", phase: "work", endsAt: null, remainingMs: null, cyclesCompleted: 0 }));
+  };
+
+  return {
+    status: state.status, phase: state.phase, cyclesCompleted: state.cyclesCompleted,
+    workMin: state.workMin, breakMin: state.breakMin, remainingMs, isLongBreak,
+    start, pause, resume, skip, reset,
+  };
+}
+
 /* ---------------- App principal ---------------- */
 
 export default function App() {
@@ -329,6 +501,7 @@ export default function App() {
   const [view, setView] = useState({ screen: "dashboard" }); // dashboard | subject | unit
   const [streak, bumpStreak] = useStreak();
   const [theme, toggleTheme] = useTheme();
+  const pomodoro = usePomodoro(bumpStreak);
 
   const overallMastery = subjects.length
     ? Math.round(subjects.reduce((a, s) => a + subjectMastery(s), 0) / subjects.length)
@@ -416,6 +589,19 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2.5">
+            {pomodoro.status !== "idle" && view.screen !== "pomodoro" && (
+              <button
+                onClick={() => setView({ screen: "pomodoro" })}
+                className={`flex items-center gap-1.5 font-display font-bold text-sm rounded-full px-3 py-1.5 ${
+                  pomodoro.phase === "work"
+                    ? "text-violet-600 bg-violet-50 border border-violet-200"
+                    : "text-teal-700 bg-teal-50 border border-teal-200"
+                }`}
+              >
+                <Timer size={15} className={pomodoro.status === "running" ? "animate-pulse" : ""} />
+                <span className="font-mono tabular-nums">{formatMs(pomodoro.remainingMs)}</span>
+              </button>
+            )}
             <button
               onClick={toggleTheme}
               className="p-2 rounded-xl text-indigo-400 hover:bg-indigo-50 transition-colors"
@@ -450,7 +636,13 @@ export default function App() {
             openSubject={(id) => setView({ screen: "subject", subjectId: id })}
             openCalendar={() => setView({ screen: "calendario" })}
             openCareer={() => setView({ screen: "carrera" })}
+            pomodoro={pomodoro}
+            openPomodoro={() => setView({ screen: "pomodoro" })}
           />
+        )}
+
+        {view.screen === "pomodoro" && (
+          <PomodoroView pomodoro={pomodoro} back={() => setView({ screen: "dashboard" })} />
         )}
 
         {view.screen === "calendario" && (
@@ -826,6 +1018,111 @@ function CalendarView({ subjects, back }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Vista Pomodoro (pantalla completa) ---------------- */
+
+function PomodoroView({ pomodoro, back }) {
+  const [workInput, setWorkInput] = useState(pomodoro.workMin);
+  const [breakInput, setBreakInput] = useState(pomodoro.breakMin);
+
+  const running = pomodoro.status === "running";
+  const paused = pomodoro.status === "paused";
+  const idle = pomodoro.status === "idle";
+  const isBreak = pomodoro.phase === "break";
+
+  const clampWork = (v) => Math.min(60, Math.max(5, Number(v) || POMODORO_WORK_DEFAULT));
+  const clampBreak = (v) => Math.min(30, Math.max(1, Number(v) || POMODORO_BREAK_DEFAULT));
+
+  const totalMs = (isBreak ? (pomodoro.isLongBreak ? POMODORO_LONG_BREAK : pomodoro.breakMin) : pomodoro.workMin) * 60000;
+  const progress = idle ? 0 : Math.min(100, Math.max(0, 100 - (pomodoro.remainingMs / totalMs) * 100));
+
+  const notifDenied = typeof Notification !== "undefined" && Notification.permission === "denied";
+
+  return (
+    <div className="anim-in max-w-md mx-auto">
+      <button onClick={back} className="flex items-center gap-1 text-indigo-400 hover:text-indigo-600 text-sm font-medium mb-4">
+        <ChevronLeft size={16} /> Inicio
+      </button>
+
+      <div className={`rounded-3xl border p-6 text-center transition-colors ${isBreak ? "bg-teal-50 border-teal-200" : "bg-violet-50 border-violet-200"}`}>
+        <p className={`font-display font-bold text-sm uppercase tracking-wide mb-1 ${isBreak ? "text-teal-600" : "text-violet-600"}`}>
+          {idle ? "Listo para arrancar" : isBreak ? (pomodoro.isLongBreak ? "Descanso largo" : "Descanso") : "Sesión de estudio"}
+        </p>
+        <p className={`font-display text-5xl sm:text-6xl font-extrabold tabular-nums mb-4 ${isBreak ? "text-teal-700" : "text-violet-700"}`}>
+          {formatMs(idle ? pomodoro.workMin * 60000 : pomodoro.remainingMs)}
+        </p>
+        <ProgressBar value={progress} colorClass={isBreak ? "bg-teal-500" : "bg-violet-500"} />
+        <p className="text-xs text-indigo-400 mt-3">
+          {pomodoro.cyclesCompleted} sesión{pomodoro.cyclesCompleted !== 1 ? "es" : ""} completada{pomodoro.cyclesCompleted !== 1 ? "s" : ""} hoy
+        </p>
+      </div>
+
+      {idle && (
+        <div className="flex items-center justify-center gap-4 mt-5">
+          <label className="text-xs text-indigo-400 flex flex-col items-center gap-1">
+            Estudio (min)
+            <input
+              type="number" min={5} max={60} value={workInput}
+              onChange={e => setWorkInput(e.target.value)}
+              className="w-16 text-center border border-indigo-100 rounded-xl px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-violet-300"
+            />
+          </label>
+          <label className="text-xs text-indigo-400 flex flex-col items-center gap-1">
+            Descanso (min)
+            <input
+              type="number" min={1} max={30} value={breakInput}
+              onChange={e => setBreakInput(e.target.value)}
+              className="w-16 text-center border border-indigo-100 rounded-xl px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-violet-300"
+            />
+          </label>
+        </div>
+      )}
+
+      <div className="flex items-center justify-center gap-3 mt-6">
+        {idle && (
+          <button
+            onClick={() => pomodoro.start(clampWork(workInput), clampBreak(breakInput))}
+            className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white font-display font-bold rounded-2xl px-6 py-3"
+          >
+            <Play size={18} /> Empezar
+          </button>
+        )}
+        {running && (
+          <button onClick={pomodoro.pause} className="flex items-center gap-2 bg-white border border-indigo-200 text-indigo-700 font-display font-bold rounded-2xl px-6 py-3">
+            <Pause size={18} /> Pausar
+          </button>
+        )}
+        {paused && (
+          <button onClick={pomodoro.resume} className="flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white font-display font-bold rounded-2xl px-6 py-3">
+            <Play size={18} /> Reanudar
+          </button>
+        )}
+        {!idle && (
+          <button onClick={pomodoro.skip} title="Saltar a la siguiente fase" className="flex items-center gap-2 bg-white border border-indigo-200 text-indigo-500 font-display font-bold rounded-2xl px-4 py-3">
+            <SkipForward size={18} />
+          </button>
+        )}
+        {!idle && (
+          <button
+            onClick={() => { if (window.confirm("¿Reiniciar la sesión de Pomodoro?")) pomodoro.reset(); }}
+            className="flex items-center gap-2 text-rose-400 hover:text-rose-600 font-display font-bold rounded-2xl px-4 py-3"
+          >
+            <RotateCcw size={18} />
+          </button>
+        )}
+      </div>
+
+      {notifDenied && (
+        <p className="text-center text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 mt-5">
+          Las notificaciones están bloqueadas para StudyFlow. Sin permiso, el tiempo no aparece en el panel de notificaciones — habilitalas desde la configuración del navegador si querés esa función.
+        </p>
+      )}
+      <p className="text-center text-xs text-indigo-300 mt-3 leading-relaxed">
+        Con la app abierta (aunque esté en segundo plano y la pantalla encendida) vas a ver el tiempo restante en las notificaciones. Con la pantalla bloqueada o el navegador cerrado, el sistema operativo pausa la cuenta — al volver a abrir StudyFlow, el tiempo se recalcula solo, sin perder precisión.
+      </p>
     </div>
   );
 }
@@ -1277,7 +1574,39 @@ function CareerWidget({ onOpen }) {
   );
 }
 
-function Dashboard({ subjects, addSubject, deleteSubject, openSubject, openCalendar, openCareer }) {
+function PomodoroCTA({ pomodoro, onOpen }) {
+  const running = pomodoro.status !== "idle";
+
+  if (!running) {
+    return (
+      <button
+        onClick={onOpen}
+        className="w-full flex items-center justify-center gap-2 bg-violet-600 hover:bg-violet-700 text-white font-display font-extrabold text-sm sm:text-base tracking-wide rounded-2xl py-4 mb-5 shadow-sm shadow-violet-200 transition-colors"
+      >
+        <Timer size={18} />
+        COMENZAR SESIÓN DE ESTUDIO
+      </button>
+    );
+  }
+
+  const label = pomodoro.phase === "work" ? "Estudiando" : (pomodoro.isLongBreak ? "Descanso largo" : "Descanso");
+  return (
+    <button
+      onClick={onOpen}
+      className={`w-full flex items-center justify-between gap-3 rounded-2xl py-4 px-5 mb-5 shadow-sm transition-colors text-white ${
+        pomodoro.phase === "work" ? "bg-violet-600 shadow-violet-200" : "bg-teal-600 shadow-teal-200"
+      }`}
+    >
+      <span className="flex items-center gap-2 font-display font-extrabold text-sm sm:text-base">
+        <Timer size={18} className={pomodoro.status === "running" ? "animate-pulse" : ""} />
+        {label}{pomodoro.status === "paused" ? " · en pausa" : ""}
+      </span>
+      <span className="font-mono text-lg font-bold tabular-nums">{formatMs(pomodoro.remainingMs)}</span>
+    </button>
+  );
+}
+
+function Dashboard({ subjects, addSubject, deleteSubject, openSubject, openCalendar, openCareer, pomodoro, openPomodoro }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
 
@@ -1291,6 +1620,8 @@ function Dashboard({ subjects, addSubject, deleteSubject, openSubject, openCalen
   return (
     <div className="anim-in">
       <QuoteCard />
+
+      <PomodoroCTA pomodoro={pomodoro} onOpen={openPomodoro} />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
         <AgendaWidget subjects={subjects} onOpen={openCalendar} />
