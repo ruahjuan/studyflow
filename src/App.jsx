@@ -4,7 +4,8 @@ import {
   BookOpen, X, ThumbsUp, ThumbsDown,
   Upload, Check, Layers, HelpCircle, RotateCcw, Loader2,
   GraduationCap, FileText, Target, Pencil, StickyNote,
-  Calendar, Map, CalendarClock, Download, Home, Sun, Moon
+  Calendar, Map, CalendarClock, Download, Home, Sun, Moon,
+  ZoomIn, ZoomOut, Highlighter, ChevronDown, ChevronUp
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -255,7 +256,7 @@ function ProgressBar({ value, colorClass = "bg-violet-500", variant = "solid" })
 
 /* ---------------- Bloc de notas (autoguardado, sin botón) ---------------- */
 
-function NotesEditor({ value, onChange, placeholder }) {
+function NotesEditor({ value, onChange, placeholder, rows = 14 }) {
   const [text, setText] = useState(value || "");
   const [pulse, setPulse] = useState(false);
   const timer = useRef(null);
@@ -285,7 +286,7 @@ function NotesEditor({ value, onChange, placeholder }) {
         value={text}
         onChange={handleChange}
         placeholder={placeholder}
-        rows={14}
+        rows={rows}
         className="w-full border border-indigo-100 rounded-2xl px-4 py-3 text-[15px] outline-none focus:ring-2 focus:ring-violet-300 font-body leading-relaxed bg-white"
       />
     </div>
@@ -1759,7 +1760,7 @@ function UnitView({ subject, unit, back, update, onStudy }) {
       )}
 
       {tab === "pdf" && unit.hasPdf && (
-        <PdfViewerTab unitId={unit.id} color={color} />
+        <PdfViewerTab unit={unit} update={update} color={color} />
       )}
 
       {tab === "flashcards" && (
@@ -1784,16 +1785,24 @@ function UnitView({ subject, unit, back, update, onStudy }) {
 
 /* ---------------- Visor de PDF propio (offline, desde IndexedDB) ---------------- */
 
-function PdfViewerTab({ unitId, color }) {
+function PdfViewerTab({ unit, update, color }) {
+  const unitId = unit.id;
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pageNum, setPageNum] = useState(1);
   const [numPages, setNumPages] = useState(0);
   const [loading, setLoading] = useState(true);
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState(false);
+  const [zoomPct, setZoomPct] = useState(100);
+  const [highlightMode, setHighlightMode] = useState(false);
+  const [highlights, setHighlights] = useState([]); // se reinicia por página, no se persiste
+  const [notesOpen, setNotesOpen] = useState(false);
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const touchStartX = useRef(null);
+  const drawRef = useRef(null); // { x, y } del marcador en curso
+
+  const ZOOM_MIN = 50, ZOOM_MAX = 250, ZOOM_STEP = 10;
 
   // Carga el PDF guardado en IndexedDB
   useEffect(() => {
@@ -1818,7 +1827,10 @@ function PdfViewerTab({ unitId, color }) {
     return () => { cancelled = true; };
   }, [unitId]);
 
-  // Renderiza la página actual en el canvas
+  // El marcador es por página: al cambiar de página se limpia
+  useEffect(() => { setHighlights([]); }, [pageNum]);
+
+  // Renderiza la página actual en el canvas, respetando el zoom manual
   useEffect(() => {
     if (!pdfDoc) return;
     let cancelled = false;
@@ -1830,13 +1842,14 @@ function PdfViewerTab({ unitId, color }) {
         const containerWidth = Math.min(containerRef.current?.clientWidth || 360, 640);
         const dpr = window.devicePixelRatio || 1;
         const base = page.getViewport({ scale: 1 });
-        const scale = (containerWidth / base.width) * dpr;
+        const fitScale = containerWidth / base.width;
+        const scale = fitScale * (zoomPct / 100) * dpr;
         const viewport = page.getViewport({ scale });
         const canvas = canvasRef.current;
         if (!canvas) return;
         canvas.width = viewport.width;
         canvas.height = viewport.height;
-        canvas.style.width = containerWidth + "px";
+        canvas.style.width = (viewport.width / dpr) + "px";
         canvas.style.height = (viewport.height / dpr) + "px";
         const ctx = canvas.getContext("2d");
         await page.render({ canvasContext: ctx, viewport }).promise;
@@ -1847,18 +1860,53 @@ function PdfViewerTab({ unitId, color }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [pdfDoc, pageNum]);
+  }, [pdfDoc, pageNum, zoomPct]);
 
   const prev = () => setPageNum(p => Math.max(1, p - 1));
   const next = () => setPageNum(p => Math.min(numPages, p + 1));
+  const clampZoom = (v) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v));
 
-  const onTouchStart = (e) => { touchStartX.current = e.touches[0].clientX; };
+  // Swipe de página: desactivado mientras se está dibujando un marcador
+  const onTouchStart = (e) => {
+    if (highlightMode) return;
+    touchStartX.current = e.touches[0].clientX;
+  };
   const onTouchEnd = (e) => {
-    if (touchStartX.current == null) return;
+    if (highlightMode || touchStartX.current == null) return;
     const dx = e.changedTouches[0].clientX - touchStartX.current;
     if (dx > 50) prev();
     else if (dx < -50) next();
     touchStartX.current = null;
+  };
+
+  // Marcador: arrastre sobre el overlay, coordenadas relativas al canvas
+  const overlayPoint = (clientX, clientY) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: ((clientX - rect.left) / rect.width) * 100,
+      y: ((clientY - rect.top) / rect.height) * 100,
+    };
+  };
+  const startDraw = (clientX, clientY) => {
+    if (!highlightMode) return;
+    drawRef.current = overlayPoint(clientX, clientY);
+  };
+  const moveDraw = (clientX, clientY) => {
+    if (!highlightMode || !drawRef.current) return;
+    const p = overlayPoint(clientX, clientY);
+    const start = drawRef.current;
+    const rect = {
+      left: Math.min(start.x, p.x),
+      top: Math.min(start.y, p.y) - 3, // franja tipo fibrón, no un rectángulo fino
+      width: Math.max(2, Math.abs(p.x - start.x)),
+      height: Math.max(3.5, Math.abs(p.y - start.y) + 3),
+    };
+    setHighlights(h => [...h.filter(x => x.id !== "draft"), { id: "draft", ...rect }]);
+  };
+  const endDraw = () => {
+    if (!highlightMode || !drawRef.current) return;
+    drawRef.current = null;
+    setHighlights(h => h.map(x => x.id === "draft" ? { ...x, id: uid() } : x));
   };
 
   if (loading) {
@@ -1879,33 +1927,92 @@ function PdfViewerTab({ unitId, color }) {
         ref={containerRef}
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
-        className="relative bg-white border border-indigo-100 rounded-2xl p-3 flex justify-center overflow-hidden select-none"
+        className="relative bg-white border border-indigo-100 rounded-2xl p-3 flex justify-center overflow-auto select-none"
       >
-        <canvas ref={canvasRef} className="max-w-full rounded-lg shadow-sm" />
-        {rendering && (
-          <div className="absolute inset-0 flex items-center justify-center bg-white/60">
-            <Loader2 className="animate-spin text-indigo-400" size={22} />
+        <div className="relative">
+          <canvas ref={canvasRef} className="max-w-full rounded-lg shadow-sm" />
+          <div
+            className="absolute inset-0"
+            style={{ cursor: highlightMode ? "crosshair" : "default" }}
+            onMouseDown={(e) => startDraw(e.clientX, e.clientY)}
+            onMouseMove={(e) => { if (e.buttons === 1) moveDraw(e.clientX, e.clientY); }}
+            onMouseUp={endDraw}
+            onMouseLeave={endDraw}
+            onTouchStart={(e) => highlightMode && startDraw(e.touches[0].clientX, e.touches[0].clientY)}
+            onTouchMove={(e) => highlightMode && moveDraw(e.touches[0].clientX, e.touches[0].clientY)}
+            onTouchEnd={endDraw}
+          >
+            {highlights.map(h => (
+              <div
+                key={h.id}
+                className="absolute bg-amber-300/50 rounded-sm pointer-events-none"
+                style={{ left: `${h.left}%`, top: `${h.top}%`, width: `${h.width}%`, height: `${h.height}%` }}
+              />
+            ))}
+          </div>
+          {rendering && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/60">
+              <Loader2 className="animate-spin text-indigo-400" size={22} />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Barra de herramientas: paginación, zoom, subrayado */}
+      <div className="flex items-center justify-center gap-2 mt-4 flex-wrap">
+        <button onClick={prev} disabled={pageNum <= 1} className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30">
+          <ChevronLeft size={16} />
+        </button>
+        <span className="text-xs font-mono text-indigo-400 w-14 text-center">{pageNum} / {numPages}</span>
+        <button onClick={next} disabled={pageNum >= numPages} className={`p-2.5 rounded-full ${color.bar} text-white disabled:opacity-30`}>
+          <ChevronRight size={16} />
+        </button>
+
+        <div className="w-px h-6 bg-indigo-100 mx-1" />
+
+        <button onClick={() => setZoomPct(z => clampZoom(z - ZOOM_STEP))} disabled={zoomPct <= ZOOM_MIN} className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30">
+          <ZoomOut size={16} />
+        </button>
+        <span className="text-xs font-mono text-indigo-400 w-12 text-center">{zoomPct}%</span>
+        <button onClick={() => setZoomPct(z => clampZoom(z + ZOOM_STEP))} disabled={zoomPct >= ZOOM_MAX} className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30">
+          <ZoomIn size={16} />
+        </button>
+
+        <div className="w-px h-6 bg-indigo-100 mx-1" />
+
+        <button
+          onClick={() => setHighlightMode(v => !v)}
+          className={`p-2.5 rounded-full border ${highlightMode ? `${color.bar} text-white border-transparent` : "bg-white border-indigo-100 text-indigo-400"}`}
+          title="Subrayar"
+        >
+          <Highlighter size={16} />
+        </button>
+      </div>
+      <p className="text-center text-xs text-indigo-300 mt-2">
+        {highlightMode ? "Arrastrá sobre el texto para marcarlo" : "Deslizá a los costados para cambiar de página"}
+      </p>
+
+      {/* Bloc de notas — general para todo el documento, colapsable */}
+      <div className="mt-4 bg-white border border-indigo-100 rounded-2xl overflow-hidden">
+        <button
+          onClick={() => setNotesOpen(v => !v)}
+          className="w-full flex items-center gap-2 px-4 py-3 text-sm font-display font-bold text-indigo-950"
+        >
+          <StickyNote size={15} className="text-indigo-400" />
+          Bloc de notas
+          {notesOpen ? <ChevronUp size={15} className="text-indigo-300 ml-auto" /> : <ChevronDown size={15} className="text-indigo-300 ml-auto" />}
+        </button>
+        {notesOpen && (
+          <div className="px-4 pb-4 border-t border-indigo-50 pt-3">
+            <NotesEditor
+              value={unit.notes}
+              onChange={(v) => update({ notes: v })}
+              placeholder={`Notas de "${unit.title}"...`}
+              rows={6}
+            />
           </div>
         )}
       </div>
-      <div className="flex items-center justify-center gap-4 mt-4">
-        <button
-          onClick={prev}
-          disabled={pageNum <= 1}
-          className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30"
-        >
-          <ChevronLeft size={18} />
-        </button>
-        <span className="text-xs font-mono text-indigo-400 w-16 text-center">{pageNum} / {numPages}</span>
-        <button
-          onClick={next}
-          disabled={pageNum >= numPages}
-          className={`p-2.5 rounded-full ${color.bar} text-white disabled:opacity-30`}
-        >
-          <ChevronRight size={18} />
-        </button>
-      </div>
-      <p className="text-center text-xs text-indigo-300 mt-2">Deslizá a los costados para cambiar de página</p>
     </div>
   );
 }
@@ -2302,4 +2409,3 @@ function QuestionsTab({ unit, update, color }) {
     </div>
   );
 }
-
