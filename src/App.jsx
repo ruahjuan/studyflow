@@ -574,8 +574,8 @@ export default function App() {
             </button>
             <button
               onClick={() => setView({ screen: "carrera" })}
-              className={`p-2 rounded-xl transition-colors ${view.screen === "carrera" ? "bg-violet-100 text-violet-700" : "text-indigo-400 hover:bg-indigo-50"}`}
-              title="Mapa de carrera"
+              className={`p-2 rounded-xl transition-colors ${(view.screen === "carrera" || view.screen === "carrera-detail") ? "bg-violet-100 text-violet-700" : "text-indigo-400 hover:bg-indigo-50"}`}
+              title="Mi carrera"
             >
               <Map size={18} />
             </button>
@@ -650,7 +650,17 @@ export default function App() {
         )}
 
         {view.screen === "carrera" && (
-          <CareerView back={() => setView({ screen: "dashboard" })} />
+          <CareerListView
+            back={() => setView({ screen: "dashboard" })}
+            openCareerDetail={(id) => setView({ screen: "carrera-detail", careerId: id })}
+          />
+        )}
+
+        {view.screen === "carrera-detail" && (
+          <CareerDetailRoute
+            careerId={view.careerId}
+            back={() => setView({ screen: "carrera" })}
+          />
         )}
 
         {view.screen === "backup" && (
@@ -1127,7 +1137,7 @@ function PomodoroView({ pomodoro, back }) {
   );
 }
 
-/* ---------------- Mapa de carrera (profesorado propio) ---------------- */
+/* ---------------- Carreras y cursos (varios programas, no solo uno) ---------------- */
 
 const CAREER_STATUS = [
   { id: "pendiente", label: "Pendiente", badge: "bg-slate-50 text-slate-500 border-slate-200" },
@@ -1135,7 +1145,49 @@ const CAREER_STATUS = [
   { id: "aprobada", label: "Aprobada", badge: "bg-emerald-50 text-emerald-600 border-emerald-200" },
 ];
 
-function CareerForm({ initial, onSave, onCancel }) {
+const CAREER_TYPES = [
+  { id: "carrera", label: "Carrera" },
+  { id: "curso", label: "Curso" },
+];
+
+// Antes había una sola carrera guardada en "studyflow_career". Ahora son varias,
+// bajo "studyflow_careers". Esta migración corre una sola vez (guarda una bandera)
+// y convierte esa carrera vieja en el primer ítem de la lista nueva.
+function useCareers() {
+  const [careers, setCareers] = useLocalStorage("studyflow_careers", []);
+  const [migrated, setMigrated] = useLocalStorage("studyflow_careers_migrated", false);
+
+  useEffect(() => {
+    if (migrated) return;
+    try {
+      const raw = window.localStorage.getItem("studyflow_career");
+      if (raw) {
+        const old = JSON.parse(raw);
+        if (old && (old.title || (old.subjects || []).length > 0)) {
+          setCareers(prev => prev.length ? prev : [{
+            id: uid(),
+            title: (!old.title || old.title === "Mi profesorado") ? "Mi carrera" : old.title,
+            type: "carrera",
+            subjects: old.subjects || [],
+          }]);
+        }
+      }
+    } catch {}
+    setMigrated(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [migrated]);
+
+  return [careers, setCareers];
+}
+
+function careerProgress(career) {
+  const subjects = career.subjects || [];
+  const approved = subjects.filter(s => s.status === "aprobada").length;
+  const pct = subjects.length ? Math.round((approved / subjects.length) * 100) : 0;
+  return { approved, total: subjects.length, pct };
+}
+
+function CareerForm({ initial, onSave, onCancel, groupLabel = "Año" }) {
   const [name, setName] = useState(initial?.name || "");
   const [year, setYear] = useState(initial?.year || 1);
   const [status, setStatus] = useState(initial?.status || "pendiente");
@@ -1163,7 +1215,7 @@ function CareerForm({ initial, onSave, onCancel }) {
           value={year}
           onChange={e => setYear(e.target.value)}
           className="w-20 border border-indigo-100 rounded-xl px-3 py-2 text-sm outline-none"
-          placeholder="Año"
+          placeholder={groupLabel}
         />
         <select value={status} onChange={e => setStatus(e.target.value)} className="border border-indigo-100 rounded-xl px-2 py-2 text-sm outline-none bg-white">
           {CAREER_STATUS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
@@ -1190,34 +1242,34 @@ function CareerForm({ initial, onSave, onCancel }) {
   );
 }
 
-function CareerView({ back }) {
-  const [career, setCareer] = useLocalStorage("studyflow_career", { title: "Mi profesorado", subjects: [] });
+// Lista de todas las carreras y cursos, con alta de nuevos programas.
+function CareerListView({ back, openCareerDetail }) {
+  const [careers, setCareers] = useCareers();
   const [adding, setAdding] = useState(false);
+  const [addType, setAddType] = useState("carrera");
+  const [addTitle, setAddTitle] = useState("");
   const [editingId, setEditingId] = useState(null);
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState(career.title);
+  const [editTitle, setEditTitle] = useState("");
 
-  const subjects = career.subjects || [];
-  const approved = subjects.filter(s => s.status === "aprobada").length;
-  const pct = subjects.length ? Math.round((approved / subjects.length) * 100) : 0;
-  const years = [...new Set(subjects.map(s => s.year || 1))].sort((a, b) => a - b);
+  const openAdd = (type) => { setAddType(type); setAddTitle(""); setAdding(true); };
 
-  const addSubject = (data) => {
-    setCareer({ ...career, subjects: [...subjects, { id: uid(), ...data }] });
+  const addCareer = () => {
+    if (!addTitle.trim()) return;
+    setCareers([...careers, { id: uid(), title: addTitle.trim(), type: addType, subjects: [] }]);
     setAdding(false);
   };
-  const editSubject = (id, data) => {
-    setCareer({ ...career, subjects: subjects.map(s => s.id === id ? { ...s, ...data } : s) });
+
+  const deleteCareer = (id) => {
+    const c = careers.find(c => c.id === id);
+    const kind = c?.type === "curso" ? "este curso" : "esta carrera";
+    if (!window.confirm(`¿Eliminar ${kind}? Se pierden todas las materias que cargaste ahí.`)) return;
+    setCareers(careers.filter(c => c.id !== id));
+  };
+
+  const startEditTitle = (c) => { setEditingId(c.id); setEditTitle(c.title); };
+  const saveEditTitle = (id) => {
+    setCareers(careers.map(c => c.id === id ? { ...c, title: editTitle.trim() || c.title } : c));
     setEditingId(null);
-  };
-  const deleteSubject = (id) => setCareer({ ...career, subjects: subjects.filter(s => s.id !== id) });
-  const cycleStatus = (s) => {
-    const order = ["pendiente", "cursando", "aprobada"];
-    editSubject(s.id, { ...s, status: order[(order.indexOf(s.status) + 1) % order.length] });
-  };
-  const saveTitle = () => {
-    setCareer({ ...career, title: titleDraft.trim() || career.title });
-    setEditingTitle(false);
   };
 
   return (
@@ -1226,27 +1278,167 @@ function CareerView({ back }) {
         <ChevronLeft size={16} /> Inicio
       </button>
 
-      {editingTitle ? (
-        <div className="flex items-center gap-2 mb-2">
-          <input
-            autoFocus
-            value={titleDraft}
-            onChange={e => setTitleDraft(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && saveTitle()}
-            className="flex-1 border border-indigo-100 rounded-xl px-3 py-2 text-lg font-display font-extrabold outline-none focus:ring-2 focus:ring-violet-300"
-          />
-          <button onClick={saveTitle} className="bg-violet-600 text-white rounded-xl px-3 py-2 text-sm font-display font-bold">Ok</button>
+      <h1 className="font-display text-2xl font-extrabold text-indigo-950 mb-5 flex items-center gap-2">
+        <Map size={22} className="text-violet-500" /> Mi carrera
+      </h1>
+
+      {!adding ? (
+        <div className="flex gap-2 mb-5">
+          <button
+            onClick={() => openAdd("carrera")}
+            className="flex-1 flex items-center justify-center gap-1.5 border-2 border-dashed border-indigo-200 text-indigo-400 hover:text-violet-600 hover:border-violet-300 rounded-2xl py-3 text-sm font-display font-bold"
+          >
+            <Plus size={15} /> Nueva carrera
+          </button>
+          <button
+            onClick={() => openAdd("curso")}
+            className="flex-1 flex items-center justify-center gap-1.5 border-2 border-dashed border-indigo-200 text-indigo-400 hover:text-violet-600 hover:border-violet-300 rounded-2xl py-3 text-sm font-display font-bold"
+          >
+            <Plus size={15} /> Nuevo curso
+          </button>
         </div>
       ) : (
-        <button onClick={() => { setTitleDraft(career.title); setEditingTitle(true); }} className="flex items-center gap-2 group mb-2">
-          <h1 className="font-display text-2xl font-extrabold text-indigo-950">{career.title}</h1>
-          <Pencil size={14} className="text-indigo-300 opacity-0 group-hover:opacity-100" />
-        </button>
+        <div className="border-2 border-violet-200 rounded-2xl p-3 mb-5 space-y-2 bg-white">
+          <div className="flex gap-1.5">
+            {CAREER_TYPES.map(t => (
+              <button
+                key={t.id}
+                onClick={() => setAddType(t.id)}
+                className={`flex-1 rounded-xl py-2 text-sm font-display font-bold transition-colors ${
+                  addType === t.id ? "bg-violet-600 text-white" : "bg-indigo-50 text-indigo-400"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+          <input
+            autoFocus
+            value={addTitle}
+            onChange={e => setAddTitle(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && addCareer()}
+            placeholder={addType === "curso" ? "Ej: Curso de Catequesis" : "Ej: Profesorado en Filosofía"}
+            className="w-full border border-indigo-100 rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-violet-300"
+          />
+          <div className="flex justify-end gap-2">
+            <button onClick={() => setAdding(false)} className="px-3 py-2 text-sm text-indigo-400">Cancelar</button>
+            <button onClick={addCareer} className="bg-violet-600 text-white rounded-xl px-4 py-2 font-display font-bold text-sm">Guardar</button>
+          </div>
+        </div>
       )}
+
+      {careers.length === 0 && !adding && (
+        <div className="text-center py-14 bg-white rounded-3xl border border-dashed border-indigo-200">
+          <Map size={32} className="mx-auto text-indigo-200 mb-2" />
+          <p className="font-display font-bold text-indigo-400">Todavía no armaste tu carrera</p>
+          <p className="text-sm text-indigo-300 mt-1">Sumá una carrera o un curso arriba.</p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {careers.map(c => {
+          const { approved, total, pct } = careerProgress(c);
+          return editingId === c.id ? (
+            <div key={c.id} className="flex items-center gap-2 bg-white border-2 border-violet-200 rounded-2xl px-3 py-2.5">
+              <input
+                autoFocus
+                value={editTitle}
+                onChange={e => setEditTitle(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && saveEditTitle(c.id)}
+                className="flex-1 border border-indigo-100 rounded-xl px-3 py-2 text-sm font-display font-bold outline-none focus:ring-2 focus:ring-violet-300"
+              />
+              <button onClick={() => saveEditTitle(c.id)} className="bg-violet-600 text-white rounded-xl px-3 py-2 text-sm font-display font-bold">Ok</button>
+              <button onClick={() => setEditingId(null)} className="text-indigo-300 px-2"><X size={16} /></button>
+            </div>
+          ) : (
+            <div key={c.id} className="group bg-white border border-indigo-100 rounded-2xl p-4 flex items-center gap-3 hover:shadow-sm transition-shadow">
+              <span className={`shrink-0 text-[11px] font-display font-bold rounded-full px-2.5 py-1 border ${
+                c.type === "curso" ? "bg-teal-50 text-teal-600 border-teal-200" : "bg-violet-50 text-violet-600 border-violet-200"
+              }`}>
+                {c.type === "curso" ? "Curso" : "Carrera"}
+              </span>
+              <button onClick={() => openCareerDetail(c.id)} className="flex-1 text-left min-w-0">
+                <p className="font-display font-bold text-indigo-950 truncate">{c.title}</p>
+                <div className="flex items-center gap-2 mt-1.5">
+                  <div className="w-28"><ProgressBar value={pct} colorClass="bg-emerald-500" variant="thread" /></div>
+                  <span className="text-xs text-indigo-400 font-mono">{approved}/{total} · {pct}%</span>
+                </div>
+              </button>
+              <button onClick={() => startEditTitle(c)} className="shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity text-indigo-300 hover:text-violet-600 p-1.5 -m-1.5"><Pencil size={15} /></button>
+              <button onClick={() => deleteCareer(c.id)} className="shrink-0 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity text-indigo-300 hover:text-rose-500 p-1.5 -m-1.5"><Trash2 size={15} /></button>
+              <ChevronRight size={18} className="text-indigo-300 shrink-0" />
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Resuelve la carrera/curso puntual por id y maneja su propio update() antes
+// de pasárselo a la vista de detalle.
+function CareerDetailRoute({ careerId, back }) {
+  const [careers, setCareers] = useCareers();
+  const career = careers.find(c => c.id === careerId);
+
+  if (!career) {
+    return (
+      <div className="anim-in">
+        <button onClick={back} className="flex items-center gap-1 text-indigo-400 hover:text-indigo-600 text-sm font-medium mb-4">
+          <ChevronLeft size={16} /> Mi carrera
+        </button>
+        <p className="text-sm text-indigo-300 text-center py-10">No encontramos esta carrera o curso — puede que la hayas borrado.</p>
+      </div>
+    );
+  }
+
+  const update = (patch) => {
+    setCareers(careers.map(c => c.id === careerId ? { ...c, ...patch } : c));
+  };
+
+  return <CareerDetailView career={career} update={update} back={back} />;
+}
+
+function CareerDetailView({ career, update, back }) {
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const subjects = career.subjects || [];
+  const { approved, total, pct } = careerProgress(career);
+  const groupLabel = career.type === "curso" ? "Nivel" : "Año";
+  const groups = [...new Set(subjects.map(s => s.year || 1))].sort((a, b) => a - b);
+
+  const addSubject = (data) => {
+    update({ subjects: [...subjects, { id: uid(), ...data }] });
+    setAdding(false);
+  };
+  const editSubject = (id, data) => {
+    update({ subjects: subjects.map(s => s.id === id ? { ...s, ...data } : s) });
+    setEditingId(null);
+  };
+  const deleteSubject = (id) => update({ subjects: subjects.filter(s => s.id !== id) });
+  const cycleStatus = (s) => {
+    const order = ["pendiente", "cursando", "aprobada"];
+    editSubject(s.id, { ...s, status: order[(order.indexOf(s.status) + 1) % order.length] });
+  };
+
+  return (
+    <div className="anim-in">
+      <button onClick={back} className="flex items-center gap-1 text-indigo-400 hover:text-indigo-600 text-sm font-medium mb-4">
+        <ChevronLeft size={16} /> Mi carrera
+      </button>
+
+      <div className="flex items-center gap-2 mb-2">
+        <span className={`shrink-0 text-[11px] font-display font-bold rounded-full px-2.5 py-1 border ${
+          career.type === "curso" ? "bg-teal-50 text-teal-600 border-teal-200" : "bg-violet-50 text-violet-600 border-violet-200"
+        }`}>
+          {career.type === "curso" ? "Curso" : "Carrera"}
+        </span>
+        <h1 className="font-display text-2xl font-extrabold text-indigo-950">{career.title}</h1>
+      </div>
 
       <div className="flex items-center gap-2 mb-5">
         <div className="w-40"><ProgressBar value={pct} colorClass="bg-emerald-500" variant="thread" /></div>
-        <span className="text-xs font-display font-bold text-indigo-400">{approved}/{subjects.length} aprobadas ({pct}%)</span>
+        <span className="text-xs font-display font-bold text-indigo-400">{approved}/{total} aprobadas ({pct}%)</span>
       </div>
 
       {!adding ? (
@@ -1254,26 +1446,26 @@ function CareerView({ back }) {
           onClick={() => setAdding(true)}
           className="w-full flex items-center justify-center gap-1.5 border-2 border-dashed border-indigo-200 text-indigo-400 hover:text-violet-600 hover:border-violet-300 rounded-2xl py-3 text-sm font-display font-bold mb-5"
         >
-          <Plus size={15} /> Nueva materia de la carrera
+          <Plus size={15} /> Nueva materia
         </button>
       ) : (
-        <div className="mb-5"><CareerForm onSave={addSubject} onCancel={() => setAdding(false)} /></div>
+        <div className="mb-5"><CareerForm groupLabel={groupLabel} onSave={addSubject} onCancel={() => setAdding(false)} /></div>
       )}
 
       {subjects.length === 0 && !adding && (
         <div className="text-center py-14 bg-white rounded-3xl border border-dashed border-indigo-200">
           <Map size={32} className="mx-auto text-indigo-200 mb-2" />
-          <p className="font-display font-bold text-indigo-400">Todavía no armaste tu mapa de carrera</p>
+          <p className="font-display font-bold text-indigo-400">Todavía no cargaste materias acá</p>
         </div>
       )}
 
-      {years.map(year => (
-        <div key={year} className="mb-5">
-          <p className="text-xs font-display font-bold text-indigo-400 mb-2 uppercase tracking-wide">Año {year}</p>
+      {groups.map(group => (
+        <div key={group} className="mb-5">
+          <p className="text-xs font-display font-bold text-indigo-400 mb-2 uppercase tracking-wide">{groupLabel} {group}</p>
           <div className="space-y-2">
-            {subjects.filter(s => (s.year || 1) === year).map(s => (
+            {subjects.filter(s => (s.year || 1) === group).map(s => (
               editingId === s.id ? (
-                <CareerForm key={s.id} initial={s} onSave={(data) => editSubject(s.id, data)} onCancel={() => setEditingId(null)} />
+                <CareerForm key={s.id} initial={s} groupLabel={groupLabel} onSave={(data) => editSubject(s.id, data)} onCancel={() => setEditingId(null)} />
               ) : (
                 <div key={s.id} className="bg-white border border-indigo-100 rounded-2xl px-4 py-3 flex items-center gap-3">
                   <button
@@ -1327,7 +1519,7 @@ async function exportBackup() {
   const subjects = readLS("studyflow_subjects", []);
   const streak = readLS("studyflow_streak", { count: 0, last: null });
   const events = readLS("studyflow_events", []);
-  const career = readLS("studyflow_career", { title: "Mi profesorado", subjects: [] });
+  const careers = readLS("studyflow_careers", []);
 
   // Los PDF originales viven en IndexedDB, no en localStorage — hay que juntarlos aparte.
   const pdfs = [];
@@ -1351,7 +1543,7 @@ async function exportBackup() {
     subjects,
     streak,
     events,
-    career,
+    careers,
     pdfs,
   };
 
@@ -1381,7 +1573,20 @@ async function importBackup(file) {
   localStorage.setItem("studyflow_subjects", JSON.stringify(data.subjects));
   localStorage.setItem("studyflow_streak", JSON.stringify(data.streak || { count: 0, last: null }));
   localStorage.setItem("studyflow_events", JSON.stringify(data.events || []));
-  localStorage.setItem("studyflow_career", JSON.stringify(data.career || { title: "Mi profesorado", subjects: [] }));
+
+  // Backups nuevos traen "careers" (lista). Backups viejos traían "career" (uno solo) —
+  // si es lo único disponible, lo convertimos a lista de un ítem al restaurar.
+  let careers = Array.isArray(data.careers) ? data.careers : [];
+  if (!careers.length && data.career && (data.career.title || (data.career.subjects || []).length > 0)) {
+    careers = [{
+      id: uid(),
+      title: (!data.career.title || data.career.title === "Mi profesorado") ? "Mi carrera" : data.career.title,
+      type: "carrera",
+      subjects: data.career.subjects || [],
+    }];
+  }
+  localStorage.setItem("studyflow_careers", JSON.stringify(careers));
+  localStorage.setItem("studyflow_careers_migrated", "true");
 
   if (Array.isArray(data.pdfs)) {
     for (const p of data.pdfs) {
@@ -1399,7 +1604,7 @@ async function importBackup(file) {
 function BackupView({ back }) {
   const subjects = readLS("studyflow_subjects", []);
   const events = readLS("studyflow_events", []);
-  const career = readLS("studyflow_career", { subjects: [] });
+  const careers = readLS("studyflow_careers", []);
   const unitCount = subjects.reduce((a, s) => a + (s.units?.length || 0), 0);
   const pdfCount = subjects.reduce((a, s) => a + (s.units || []).filter(u => u.hasPdf).length, 0);
 
@@ -1455,7 +1660,7 @@ function BackupView({ back }) {
         <div><p className="font-display text-xl font-extrabold text-indigo-950">{subjects.length}</p><p className="text-xs text-indigo-400">materias</p></div>
         <div><p className="font-display text-xl font-extrabold text-indigo-950">{unitCount}</p><p className="text-xs text-indigo-400">unidades</p></div>
         <div><p className="font-display text-xl font-extrabold text-indigo-950">{events.length}</p><p className="text-xs text-indigo-400">eventos</p></div>
-        <div><p className="font-display text-xl font-extrabold text-indigo-950">{(career.subjects || []).length}</p><p className="text-xs text-indigo-400">carrera</p></div>
+        <div><p className="font-display text-xl font-extrabold text-indigo-950">{careers.length}</p><p className="text-xs text-indigo-400">carreras/cursos</p></div>
       </div>
 
       {msg && (
@@ -1545,31 +1750,70 @@ function AgendaWidget({ subjects, onOpen }) {
 }
 
 function CareerWidget({ onOpen }) {
-  const [career] = useLocalStorage("studyflow_career", { title: "Mi profesorado", subjects: [] });
-  const subjects = career.subjects || [];
-  const approved = subjects.filter(s => s.status === "aprobada").length;
-  const pct = subjects.length ? Math.round((approved / subjects.length) * 100) : 0;
+  const [careers] = useCareers();
+
+  if (careers.length === 0) {
+    return (
+      <button onClick={onOpen} className="text-left bg-white border border-indigo-100 rounded-2xl p-4 hover:shadow-sm transition-shadow w-full">
+        <div className="flex items-center justify-between mb-1 gap-2">
+          <p className="font-display font-bold text-indigo-950 flex items-center gap-1.5 truncate">
+            <Map size={16} className="text-violet-500 shrink-0" /> Mi carrera
+          </p>
+          <ChevronRight size={16} className="text-indigo-300 shrink-0" />
+        </div>
+        <p className="text-sm text-indigo-300">Todavía no armaste tu carrera.</p>
+      </button>
+    );
+  }
+
+  if (careers.length === 1) {
+    const c = careers[0];
+    const { approved, total, pct } = careerProgress(c);
+    return (
+      <button onClick={onOpen} className="text-left bg-white border border-indigo-100 rounded-2xl p-4 hover:shadow-sm transition-shadow w-full">
+        <div className="flex items-center justify-between mb-3 gap-2">
+          <p className="font-display font-bold text-indigo-950 flex items-center gap-1.5 truncate">
+            <Map size={16} className="text-violet-500 shrink-0" /> <span className="truncate">{c.title}</span>
+          </p>
+          <ChevronRight size={16} className="text-indigo-300 shrink-0" />
+        </div>
+        {total === 0 ? (
+          <p className="text-sm text-indigo-300">Todavía no cargaste materias.</p>
+        ) : (
+          <>
+            <div className="flex items-center gap-2 mb-1.5">
+              <div className="flex-1"><ProgressBar value={pct} colorClass="bg-emerald-500" variant="thread" /></div>
+              <span className="text-xs font-display font-bold text-indigo-400 shrink-0">{pct}%</span>
+            </div>
+            <p className="text-xs text-indigo-400">{approved}/{total} materias aprobadas</p>
+          </>
+        )}
+      </button>
+    );
+  }
 
   return (
     <button onClick={onOpen} className="text-left bg-white border border-indigo-100 rounded-2xl p-4 hover:shadow-sm transition-shadow w-full">
       <div className="flex items-center justify-between mb-3 gap-2">
         <p className="font-display font-bold text-indigo-950 flex items-center gap-1.5 truncate">
-          <Map size={16} className="text-violet-500 shrink-0" /> <span className="truncate">{career.title}</span>
+          <Map size={16} className="text-violet-500 shrink-0" /> Mi carrera
         </p>
         <ChevronRight size={16} className="text-indigo-300 shrink-0" />
       </div>
-
-      {subjects.length === 0 ? (
-        <p className="text-sm text-indigo-300">Todavía no armaste tu mapa de carrera.</p>
-      ) : (
-        <>
-          <div className="flex items-center gap-2 mb-1.5">
-            <div className="flex-1"><ProgressBar value={pct} colorClass="bg-emerald-500" variant="thread" /></div>
-            <span className="text-xs font-display font-bold text-indigo-400 shrink-0">{pct}%</span>
-          </div>
-          <p className="text-xs text-indigo-400">{approved}/{subjects.length} materias aprobadas</p>
-        </>
-      )}
+      <div className="space-y-1.5">
+        {careers.slice(0, 3).map(c => {
+          const { pct } = careerProgress(c);
+          return (
+            <div key={c.id} className="flex items-center gap-2 text-sm">
+              <span className="text-indigo-800 truncate flex-1">{c.title}</span>
+              <span className="text-xs text-indigo-400 font-mono shrink-0">{pct}%</span>
+            </div>
+          );
+        })}
+        {careers.length > 3 && (
+          <p className="text-xs text-indigo-300">+{careers.length - 3} más</p>
+        )}
+      </div>
     </button>
   );
 }
