@@ -5,7 +5,7 @@ import {
   Upload, Check, Layers, HelpCircle, RotateCcw, Loader2,
   GraduationCap, FileText, Target, Pencil, StickyNote,
   Calendar, Map, CalendarClock, Download, Home, Sun, Moon,
-  ZoomIn, ZoomOut, Highlighter, ChevronDown, ChevronUp,
+  ZoomIn, ZoomOut, Highlighter,
   Play, Pause, Timer, SkipForward
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
@@ -165,6 +165,8 @@ const FONT_STYLE = `
 
   /* padding inferior que respeta el home indicator / gesture bar de iOS y Android */
   .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  /* padding superior que respeta el notch / status bar */
+  .pt-safe { padding-top: env(safe-area-inset-top, 0px); }
 
   /* El modo oscuro ahora vive en index.css como overrides de las variables
      de color de Tailwind (--color-violet-500, etc.) dentro de .dark —
@@ -2335,7 +2337,7 @@ function UnitView({ subject, unit, back, update, onStudy }) {
       )}
 
       {tab === "pdf" && unit.hasPdf && (
-        <PdfViewerTab unit={unit} update={update} color={color} />
+        <PdfViewerTab unit={unit} update={update} color={color} onExit={() => setTab("lectura")} />
       )}
 
       {tab === "flashcards" && (
@@ -2360,7 +2362,7 @@ function UnitView({ subject, unit, back, update, onStudy }) {
 
 /* ---------------- Visor de PDF propio (offline, desde IndexedDB) ---------------- */
 
-function PdfViewerTab({ unit, update, color }) {
+function PdfViewerTab({ unit, update, color, onExit }) {
   const unitId = unit.id;
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pageNum, setPageNum] = useState(1);
@@ -2378,6 +2380,15 @@ function PdfViewerTab({ unit, update, color }) {
   const drawRef = useRef(null); // { x, y } del marcador en curso
 
   const ZOOM_MIN = 50, ZOOM_MAX = 250, ZOOM_STEP = 10;
+
+  // Este visor tapa toda la pantalla (header y nav inferior incluidos) mientras
+  // está montado, para aprovechar el ancho completo como un lector nativo.
+  // Bloqueamos el scroll del body así no queda "doble scroll" atrás.
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
 
   // Carga el PDF guardado en IndexedDB
   useEffect(() => {
@@ -2405,7 +2416,8 @@ function PdfViewerTab({ unit, update, color }) {
   // El marcador es por página: al cambiar de página se limpia
   useEffect(() => { setHighlights([]); }, [pageNum]);
 
-  // Renderiza la página actual en el canvas, respetando el zoom manual
+  // Renderiza la página actual en el canvas, respetando el zoom manual.
+  // Sin tope de ancho artificial: usa el ancho real de pantalla, como un lector nativo.
   useEffect(() => {
     if (!pdfDoc) return;
     let cancelled = false;
@@ -2414,7 +2426,7 @@ function PdfViewerTab({ unit, update, color }) {
       try {
         const page = await pdfDoc.getPage(pageNum);
         if (cancelled) return;
-        const containerWidth = Math.min(containerRef.current?.clientWidth || 360, 640);
+        const containerWidth = containerRef.current?.clientWidth || 360;
         const dpr = window.devicePixelRatio || 1;
         const base = page.getViewport({ scale: 1 });
         const fitScale = containerWidth / base.width;
@@ -2484,110 +2496,133 @@ function PdfViewerTab({ unit, update, color }) {
     setHighlights(h => h.map(x => x.id === "draft" ? { ...x, id: uid() } : x));
   };
 
-  if (loading) {
-    return <div className="text-center py-14"><Loader2 className="animate-spin mx-auto text-indigo-400" size={26} /></div>;
-  }
-  if (error) {
-    return (
-      <div className="text-center py-12 bg-white rounded-2xl border border-dashed border-indigo-200">
-        <FileText size={30} className="mx-auto text-indigo-200 mb-2" />
-        <p className="text-indigo-400 font-display font-bold">No se pudo cargar el PDF guardado.</p>
-      </div>
-    );
-  }
-
+  // Pantalla completa fija: tapa header y nav inferior de la app (z-50 los gana
+  // a ambos, que están en z-20), sin necesidad de un portal.
   return (
-    <div className="anim-in">
-      <div
-        ref={containerRef}
-        onTouchStart={onTouchStart}
-        onTouchEnd={onTouchEnd}
-        className="relative bg-white border border-indigo-100 rounded-2xl p-3 flex justify-center overflow-auto select-none"
-      >
-        <div className="relative">
-          <canvas ref={canvasRef} className="max-w-full rounded-lg shadow-sm" />
+    <div className="fixed inset-0 z-50 bg-neutral-900 flex flex-col anim-in">
+      {/* barra superior mínima */}
+      <div className="pt-safe shrink-0 flex items-center justify-between gap-3 px-3 py-2 bg-neutral-900/95 text-white">
+        <button onClick={onExit} className="flex items-center gap-1 p-1.5 -m-1.5 text-white/80 hover:text-white">
+          <ChevronLeft size={20} />
+        </button>
+        <span className="flex-1 text-xs font-mono text-white/50 truncate text-center">{unit.title}</span>
+        <span className="text-xs font-mono text-white/50 shrink-0">
+          {loading ? "…" : `${pageNum} / ${numPages}`}
+        </span>
+      </div>
+
+      {loading && (
+        <div className="flex-1 flex items-center justify-center">
+          <Loader2 className="animate-spin text-white/60" size={28} />
+        </div>
+      )}
+
+      {!loading && error && (
+        <div className="flex-1 flex flex-col items-center justify-center text-center px-6">
+          <FileText size={30} className="text-white/30 mb-2" />
+          <p className="text-white/60 font-display font-bold">No se pudo cargar el PDF guardado.</p>
+        </div>
+      )}
+
+      {!loading && !error && (
+        <>
           <div
-            className="absolute inset-0"
-            style={{ cursor: highlightMode ? "crosshair" : "default" }}
-            onMouseDown={(e) => startDraw(e.clientX, e.clientY)}
-            onMouseMove={(e) => { if (e.buttons === 1) moveDraw(e.clientX, e.clientY); }}
-            onMouseUp={endDraw}
-            onMouseLeave={endDraw}
-            onTouchStart={(e) => highlightMode && startDraw(e.touches[0].clientX, e.touches[0].clientY)}
-            onTouchMove={(e) => highlightMode && moveDraw(e.touches[0].clientX, e.touches[0].clientY)}
-            onTouchEnd={endDraw}
+            ref={containerRef}
+            onTouchStart={onTouchStart}
+            onTouchEnd={onTouchEnd}
+            className="relative flex-1 overflow-auto flex justify-center select-none"
           >
-            {highlights.map(h => (
+            <div className="relative shrink-0">
+              <canvas ref={canvasRef} className="block" />
               <div
-                key={h.id}
-                className="absolute bg-amber-300/50 rounded-sm pointer-events-none"
-                style={{ left: `${h.left}%`, top: `${h.top}%`, width: `${h.width}%`, height: `${h.height}%` }}
-              />
-            ))}
+                className="absolute inset-0"
+                style={{ cursor: highlightMode ? "crosshair" : "default" }}
+                onMouseDown={(e) => startDraw(e.clientX, e.clientY)}
+                onMouseMove={(e) => { if (e.buttons === 1) moveDraw(e.clientX, e.clientY); }}
+                onMouseUp={endDraw}
+                onMouseLeave={endDraw}
+                onTouchStart={(e) => highlightMode && startDraw(e.touches[0].clientX, e.touches[0].clientY)}
+                onTouchMove={(e) => highlightMode && moveDraw(e.touches[0].clientX, e.touches[0].clientY)}
+                onTouchEnd={endDraw}
+              >
+                {highlights.map(h => (
+                  <div
+                    key={h.id}
+                    className="absolute bg-amber-300/50 rounded-sm pointer-events-none"
+                    style={{ left: `${h.left}%`, top: `${h.top}%`, width: `${h.width}%`, height: `${h.height}%` }}
+                  />
+                ))}
+              </div>
+              {rendering && (
+                <div className="absolute inset-0 flex items-center justify-center bg-white/60">
+                  <Loader2 className="animate-spin text-indigo-400" size={22} />
+                </div>
+              )}
+            </div>
           </div>
-          {rendering && (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/60">
-              <Loader2 className="animate-spin text-indigo-400" size={22} />
+
+          {/* barra flotante: paginación, zoom, subrayado, notas */}
+          <div className="pb-safe shrink-0 flex justify-center pb-3">
+            <div className="flex items-center gap-1 bg-white rounded-full shadow-lg px-2 py-1.5">
+              <button onClick={prev} disabled={pageNum <= 1} className="p-2 rounded-full text-indigo-400 disabled:opacity-30">
+                <ChevronLeft size={16} />
+              </button>
+              <button onClick={next} disabled={pageNum >= numPages} className={`p-2 rounded-full ${color.bar} text-white disabled:opacity-30`}>
+                <ChevronRight size={16} />
+              </button>
+
+              <div className="w-px h-5 bg-indigo-100 mx-0.5" />
+
+              <button onClick={() => setZoomPct(z => clampZoom(z - ZOOM_STEP))} disabled={zoomPct <= ZOOM_MIN} className="p-2 rounded-full text-indigo-400 disabled:opacity-30">
+                <ZoomOut size={16} />
+              </button>
+              <span className="text-[11px] font-mono text-indigo-400 w-10 text-center">{zoomPct}%</span>
+              <button onClick={() => setZoomPct(z => clampZoom(z + ZOOM_STEP))} disabled={zoomPct >= ZOOM_MAX} className="p-2 rounded-full text-indigo-400 disabled:opacity-30">
+                <ZoomIn size={16} />
+              </button>
+
+              <div className="w-px h-5 bg-indigo-100 mx-0.5" />
+
+              <button
+                onClick={() => setHighlightMode(v => !v)}
+                className={`p-2 rounded-full ${highlightMode ? `${color.bar} text-white` : "text-indigo-400"}`}
+                title="Subrayar"
+              >
+                <Highlighter size={16} />
+              </button>
+              <button
+                onClick={() => setNotesOpen(v => !v)}
+                className={`p-2 rounded-full ${notesOpen ? `${color.bar} text-white` : "text-indigo-400"}`}
+                title="Bloc de notas"
+              >
+                <StickyNote size={16} />
+              </button>
+            </div>
+          </div>
+
+          {/* bloc de notas como hoja inferior — no empuja el canvas, se superpone */}
+          {notesOpen && (
+            <div className="absolute inset-x-0 bottom-0 max-h-[65vh] bg-white rounded-t-3xl shadow-2xl flex flex-col anim-in">
+              <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-indigo-50">
+                <span className="flex items-center gap-2 text-sm font-display font-bold text-indigo-950">
+                  <StickyNote size={15} className="text-indigo-400" /> Bloc de notas
+                </span>
+                <button onClick={() => setNotesOpen(false)} className="text-indigo-300 hover:text-indigo-500 p-1.5 -m-1.5">
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="px-4 py-3 pb-safe overflow-auto">
+                <NotesEditor
+                  value={unit.notes}
+                  onChange={(v) => update({ notes: v })}
+                  placeholder={`Notas de "${unit.title}"...`}
+                  rows={6}
+                />
+              </div>
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Barra de herramientas: paginación, zoom, subrayado */}
-      <div className="flex items-center justify-center gap-2 mt-4 flex-wrap">
-        <button onClick={prev} disabled={pageNum <= 1} className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30">
-          <ChevronLeft size={16} />
-        </button>
-        <span className="text-xs font-mono text-indigo-400 w-14 text-center">{pageNum} / {numPages}</span>
-        <button onClick={next} disabled={pageNum >= numPages} className={`p-2.5 rounded-full ${color.bar} text-white disabled:opacity-30`}>
-          <ChevronRight size={16} />
-        </button>
-
-        <div className="w-px h-6 bg-indigo-100 mx-1" />
-
-        <button onClick={() => setZoomPct(z => clampZoom(z - ZOOM_STEP))} disabled={zoomPct <= ZOOM_MIN} className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30">
-          <ZoomOut size={16} />
-        </button>
-        <span className="text-xs font-mono text-indigo-400 w-12 text-center">{zoomPct}%</span>
-        <button onClick={() => setZoomPct(z => clampZoom(z + ZOOM_STEP))} disabled={zoomPct >= ZOOM_MAX} className="p-2.5 rounded-full bg-white border border-indigo-100 text-indigo-400 disabled:opacity-30">
-          <ZoomIn size={16} />
-        </button>
-
-        <div className="w-px h-6 bg-indigo-100 mx-1" />
-
-        <button
-          onClick={() => setHighlightMode(v => !v)}
-          className={`p-2.5 rounded-full border ${highlightMode ? `${color.bar} text-white border-transparent` : "bg-white border-indigo-100 text-indigo-400"}`}
-          title="Subrayar"
-        >
-          <Highlighter size={16} />
-        </button>
-      </div>
-      <p className="text-center text-xs text-indigo-300 mt-2">
-        {highlightMode ? "Arrastrá sobre el texto para marcarlo" : "Deslizá a los costados para cambiar de página"}
-      </p>
-
-      {/* Bloc de notas — general para todo el documento, colapsable */}
-      <div className="mt-4 bg-white border border-indigo-100 rounded-2xl overflow-hidden">
-        <button
-          onClick={() => setNotesOpen(v => !v)}
-          className="w-full flex items-center gap-2 px-4 py-3 text-sm font-display font-bold text-indigo-950"
-        >
-          <StickyNote size={15} className="text-indigo-400" />
-          Bloc de notas
-          {notesOpen ? <ChevronUp size={15} className="text-indigo-300 ml-auto" /> : <ChevronDown size={15} className="text-indigo-300 ml-auto" />}
-        </button>
-        {notesOpen && (
-          <div className="px-4 pb-4 border-t border-indigo-50 pt-3">
-            <NotesEditor
-              value={unit.notes}
-              onChange={(v) => update({ notes: v })}
-              placeholder={`Notas de "${unit.title}"...`}
-              rows={6}
-            />
-          </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
